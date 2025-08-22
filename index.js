@@ -517,7 +517,7 @@ app.post('/api/signup', async (req, res) => {
 
 app.post('/api/signin', async (req, res) => {
     try {
-        const { email, password } = req.body;
+    const { email, password } = req.body;
         
         // Find user by email
         const user = await User.findOne({ email });
