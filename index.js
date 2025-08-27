@@ -146,16 +146,16 @@ const trackSchema = new mongoose.Schema({
     trim: true
   },
   genreCategory: {
-    type: String,
-    trim: true
+    type: [String],
+    default: []
   },
   beatCategory: {
-    type: String,
-    trim: true
+    type: [String],
+    default: []
   },
   trackTags: {
-    type: String,
-    trim: true
+    type: [String],
+    default: []
   },
   seoTitle: {
     type: String,
@@ -670,9 +670,9 @@ app.post('/api/tracks', async (req, res) => {
             trackFile: trackFile || '',
             about: about || '',
             publish: publish || 'Private',
-            genreCategory: genreCategory || '',
-            beatCategory: beatCategory || '',
-            trackTags: trackTags || '',
+            genreCategory: Array.isArray(genreCategory) ? genreCategory : [],
+            beatCategory: Array.isArray(beatCategory) ? beatCategory : [],
+            trackTags: Array.isArray(trackTags) ? trackTags : [],
             seoTitle: seoTitle || '',
             metaKeyword: metaKeyword || '',
             metaDescription: metaDescription || ''
@@ -746,6 +746,107 @@ app.get('/api/tracks', async (req, res) => {
     }
 });
 
+// Update track endpoint
+app.put('/api/tracks/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const updateData = req.body;
+
+        const track = await Track.findById(id);
+        if (!track) {
+            return res.status(404).json({
+                success: false,
+                message: 'Track not found'
+            });
+        }
+
+        // Check if trackId is being changed and if it conflicts with existing track
+        if (updateData.trackId && updateData.trackId !== track.trackId) {
+            const existingTrack = await Track.findOne({ trackId: updateData.trackId, _id: { $ne: id } });
+            if (existingTrack) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Track with this ID already exists'
+                });
+            }
+        }
+
+        // Update track fields
+        Object.keys(updateData).forEach(key => {
+            if (updateData[key] !== undefined) {
+                track[key] = updateData[key];
+            }
+        });
+
+        track.updatedAt = new Date();
+        await track.save();
+
+        res.json({
+            success: true,
+            message: 'Track updated successfully',
+            track: {
+                id: track._id,
+                trackName: track.trackName,
+                trackId: track.trackId,
+                bpm: track.bpm,
+                trackKey: track.trackKey,
+                trackPrice: track.trackPrice,
+                musician: track.musician,
+                trackType: track.trackType,
+                moodType: track.moodType,
+                energyType: track.energyType,
+                instrument: track.instrument,
+                generatedTrackPlatform: track.generatedTrackPlatform,
+                trackImage: track.trackImage,
+                trackFile: track.trackFile,
+                about: track.about,
+                publish: track.publish,
+                genreCategory: track.genreCategory,
+                beatCategory: track.beatCategory,
+                trackTags: track.trackTags,
+                seoTitle: track.seoTitle,
+                metaKeyword: track.metaKeyword,
+                metaDescription: track.metaDescription,
+                updatedAt: track.updatedAt
+            }
+        });
+    } catch (error) {
+        console.error('Track update error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error',
+            details: error.message
+        });
+    }
+});
+
+// Delete track endpoint
+app.delete('/api/tracks/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const track = await Track.findByIdAndDelete(id);
+        if (!track) {
+            return res.status(404).json({
+                success: false,
+                message: 'Track not found'
+            });
+        }
+
+        res.json({
+            success: true,
+            message: 'Track deleted successfully'
+        });
+    } catch (error) {
+        console.error('Track delete error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error',
+            details: error.message
+        });
+    }
+});
+
 // Genre API endpoints
 app.post('/api/genres', async (req, res) => {
     try {
@@ -796,7 +897,7 @@ app.post('/api/genres', async (req, res) => {
 // Get all genres endpoint
 app.get('/api/genres', async (req, res) => {
     try {
-        const genres = await Genre.find({ isActive: true }).sort({ name: 1 });
+        const genres = await Genre.find().sort({ name: 1 });
         res.json({
             success: true,
             genres: genres
@@ -866,23 +967,18 @@ app.put('/api/genres/:id', async (req, res) => {
     }
 });
 
-// Delete genre endpoint (soft delete)
+// Delete genre endpoint (hard delete)
 app.delete('/api/genres/:id', async (req, res) => {
     try {
         const { id } = req.params;
 
-        const genre = await Genre.findById(id);
+        const genre = await Genre.findByIdAndDelete(id);
         if (!genre) {
             return res.status(404).json({
                 success: false,
                 message: 'Genre not found'
             });
         }
-
-        // Soft delete by setting isActive to false
-        genre.isActive = false;
-        genre.updatedAt = new Date();
-        await genre.save();
 
         res.json({
             success: true,
@@ -948,7 +1044,7 @@ app.post('/api/beats', async (req, res) => {
 // Get all beats endpoint
 app.get('/api/beats', async (req, res) => {
     try {
-        const beats = await Beat.find({ isActive: true }).sort({ name: 1 });
+        const beats = await Beat.find().sort({ name: 1 });
         res.json({
             success: true,
             beats: beats
@@ -1018,23 +1114,18 @@ app.put('/api/beats/:id', async (req, res) => {
     }
 });
 
-// Delete beat endpoint (soft delete)
+// Delete beat endpoint (hard delete)
 app.delete('/api/beats/:id', async (req, res) => {
     try {
         const { id } = req.params;
 
-        const beat = await Beat.findById(id);
+        const beat = await Beat.findByIdAndDelete(id);
         if (!beat) {
             return res.status(404).json({
                 success: false,
                 message: 'Beat not found'
             });
         }
-
-        // Soft delete by setting isActive to false
-        beat.isActive = false;
-        beat.updatedAt = new Date();
-        await beat.save();
 
         res.json({
             success: true,
@@ -1100,7 +1191,7 @@ app.post('/api/tags', async (req, res) => {
 // Get all tags endpoint
 app.get('/api/tags', async (req, res) => {
     try {
-        const tags = await Tag.find({ isActive: true }).sort({ name: 1 });
+        const tags = await Tag.find().sort({ name: 1 });
         res.json({
             success: true,
             tags: tags
@@ -1170,23 +1261,18 @@ app.put('/api/tags/:id', async (req, res) => {
     }
 });
 
-// Delete tag endpoint (soft delete)
+// Delete tag endpoint (hard delete)
 app.delete('/api/tags/:id', async (req, res) => {
     try {
         const { id } = req.params;
 
-        const tag = await Tag.findById(id);
+        const tag = await Tag.findByIdAndDelete(id);
         if (!tag) {
             return res.status(404).json({
                 success: false,
                 message: 'Tag not found'
             });
         }
-
-        // Soft delete by setting isActive to false
-        tag.isActive = false;
-        tag.updatedAt = new Date();
-        await tag.save();
 
         res.json({
             success: true,
@@ -1318,6 +1404,72 @@ app.get('/api/sound-kits', async (req, res) => {
     }
 });
 
+// Update sound kit endpoint
+app.put('/api/sound-kits/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const updateData = req.body;
+
+        const soundKit = await SoundKit.findById(id);
+        if (!soundKit) {
+            return res.status(404).json({
+                success: false,
+                message: 'Sound kit not found'
+            });
+        }
+
+        // Update fields if provided
+        Object.keys(updateData).forEach(key => {
+            if (updateData[key] !== undefined) {
+                soundKit[key] = updateData[key];
+            }
+        });
+        
+        soundKit.updatedAt = new Date();
+        await soundKit.save();
+
+        res.json({
+            success: true,
+            message: 'Sound kit updated successfully',
+            soundKit: soundKit
+        });
+    } catch (error) {
+        console.error('Update sound kit error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error'
+        });
+    }
+});
+
+// Delete sound kit endpoint
+app.delete('/api/sound-kits/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const soundKit = await SoundKit.findById(id);
+        if (!soundKit) {
+            return res.status(404).json({
+                success: false,
+                message: 'Sound kit not found'
+            });
+        }
+
+        await SoundKit.findByIdAndDelete(id);
+
+        res.json({
+            success: true,
+            message: 'Sound kit deleted successfully'
+        });
+    } catch (error) {
+        console.error('Delete sound kit error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error'
+        });
+    }
+});
+
 // Sound Kit Category API endpoints
 app.post('/api/sound-kit-categories', async (req, res) => {
     try {
@@ -1361,7 +1513,7 @@ app.post('/api/sound-kit-categories', async (req, res) => {
 
 app.get('/api/sound-kit-categories', async (req, res) => {
     try {
-        const categories = await SoundKitCategory.find({ isActive: true }).sort({ createdAt: -1 });
+        const categories = await SoundKitCategory.find().sort({ createdAt: -1 });
         res.json({
             success: true,
             categories: categories
@@ -1420,19 +1572,22 @@ app.put('/api/sound-kit-categories/:id', async (req, res) => {
 app.delete('/api/sound-kit-categories/:id', async (req, res) => {
     try {
         const { id } = req.params;
+        console.log('Backend: Received delete request for sound kit category ID:', id);
 
         const category = await SoundKitCategory.findById(id);
+        console.log('Backend: Found category:', category);
+        
         if (!category) {
+            console.log('Backend: Category not found');
             return res.status(404).json({
                 success: false,
                 message: 'Category not found'
             });
         }
 
-        // Soft delete
-        category.isActive = false;
-        category.updatedAt = new Date();
-        await category.save();
+        // Hard delete - actually remove from MongoDB
+        await SoundKitCategory.findByIdAndDelete(id);
+        console.log('Backend: Category permanently deleted from MongoDB');
 
         res.json({
             success: true,
@@ -1490,7 +1645,7 @@ app.post('/api/sound-kit-tags', async (req, res) => {
 
 app.get('/api/sound-kit-tags', async (req, res) => {
     try {
-        const tags = await SoundKitTag.find({ isActive: true }).sort({ createdAt: -1 });
+        const tags = await SoundKitTag.find().sort({ createdAt: -1 });
         res.json({
             success: true,
             tags: tags
@@ -1549,19 +1704,22 @@ app.put('/api/sound-kit-tags/:id', async (req, res) => {
 app.delete('/api/sound-kit-tags/:id', async (req, res) => {
     try {
         const { id } = req.params;
+        console.log('Backend: Received delete request for sound kit tag ID:', id);
 
         const tag = await SoundKitTag.findById(id);
+        console.log('Backend: Found tag:', tag);
+        
         if (!tag) {
+            console.log('Backend: Tag not found');
             return res.status(404).json({
                 success: false,
                 message: 'Tag not found'
             });
         }
 
-        // Soft delete
-        tag.isActive = false;
-        tag.updatedAt = new Date();
-        await tag.save();
+        // Hard delete - actually remove from MongoDB
+        await SoundKitTag.findByIdAndDelete(id);
+        console.log('Backend: Tag permanently deleted from MongoDB');
 
         res.json({
             success: true,
