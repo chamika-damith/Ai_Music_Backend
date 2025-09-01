@@ -2,10 +2,42 @@ require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const multer = require('multer');
+const fs = require('fs');
+const path = require('path');
 const app = express();
 
 app.use(cors());
 app.use(express.json());
+
+// MongoDB connection
+mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/ai_music_db');
+
+// GridFS setup using mongoose
+let bucket;
+const conn = mongoose.connection;
+conn.once('open', () => {
+  bucket = new mongoose.mongo.GridFSBucket(conn.db, {
+    bucketName: 'uploads'
+  });
+});
+
+// Multer configuration for file uploads
+const storage = multer.memoryStorage();
+const upload = multer({ 
+  storage: storage,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    // Allow only image files
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only image files are allowed!'), false);
+    }
+  }
+});
 
 // User Schema
 const userSchema = new mongoose.Schema({
@@ -146,16 +178,16 @@ const trackSchema = new mongoose.Schema({
     trim: true
   },
   genreCategory: {
-    type: String,
-    trim: true
+    type: [String],
+    default: []
   },
   beatCategory: {
-    type: String,
-    trim: true
+    type: [String],
+    default: []
   },
   trackTags: {
-    type: String,
-    trim: true
+    type: [String],
+    default: []
   },
   seoTitle: {
     type: String,
@@ -519,12 +551,17 @@ app.post('/api/signin', async (req, res) => {
     try {
     const { email, password } = req.body;
         
-        // Find user by email
-        const user = await User.findOne({ email });
+        // Find user by email or displayName (username)
+        const user = await User.findOne({
+            $or: [
+                { email: email },
+                { displayName: email }
+            ]
+        });
         if (!user) {
             return res.status(401).json({ 
                 success: false, 
-                message: 'Invalid email or password' 
+                message: 'Invalid email/username or password' 
             });
         }
         
@@ -615,6 +652,211 @@ app.put('/api/profile/:userId', async (req, res) => {
     }
 });
 
+// Get all users endpoint
+app.get('/api/users', async (req, res) => {
+    try {
+        const users = await User.find({}).select('-password'); // Exclude password field
+        
+        res.status(200).json({
+            success: true,
+            users: users.map(user => ({
+                id: user._id,
+                firstName: user.firstName,
+                lastName: user.lastName,
+                email: user.email,
+                displayName: user.displayName || '',
+                location: user.location || '',
+                country: user.country || '',
+                biography: user.biography || '',
+                socialLinks: user.socialLinks || {},
+                createdAt: user.createdAt
+            }))
+        });
+    } catch (error) {
+        console.error('Get users error:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Internal server error' 
+        });
+    }
+});
+
+// Update user endpoint
+app.put('/api/users/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const {
+            firstName,
+            lastName,
+            email,
+            displayName,
+            location,
+            country,
+            biography
+        } = req.body;
+
+        // Check if user exists
+        const user = await User.findById(id);
+        if (!user) {
+            return res.status(404).json({
+                success: false,
+                message: 'User not found'
+            });
+        }
+
+        // Check if email is being changed and if it already exists
+        if (email && email !== user.email) {
+            const existingUser = await User.findOne({ email });
+            if (existingUser) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Email already exists'
+                });
+            }
+        }
+
+        // Update user fields
+        user.firstName = firstName || user.firstName;
+        user.lastName = lastName || user.lastName;
+        user.email = email || user.email;
+        user.displayName = displayName !== undefined ? displayName : user.displayName;
+        user.location = location !== undefined ? location : user.location;
+        user.country = country !== undefined ? country : user.country;
+        user.biography = biography !== undefined ? biography : user.biography;
+
+        await user.save();
+
+        res.status(200).json({
+            success: true,
+            message: 'User updated successfully',
+            user: {
+                id: user._id,
+                firstName: user.firstName,
+                lastName: user.lastName,
+                email: user.email,
+                displayName: user.displayName,
+                location: user.location,
+                country: user.country,
+                biography: user.biography,
+                socialLinks: user.socialLinks,
+                createdAt: user.createdAt
+            }
+        });
+    } catch (error) {
+        console.error('Update user error:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Internal server error' 
+        });
+    }
+});
+
+// Delete user endpoint
+app.delete('/api/users/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        // Check if user exists
+        const user = await User.findById(id);
+        if (!user) {
+            return res.status(404).json({
+                success: false,
+                message: 'User not found'
+            });
+        }
+
+        // Delete user
+        await User.findByIdAndDelete(id);
+
+        res.status(200).json({
+            success: true,
+            message: 'User deleted successfully'
+        });
+    } catch (error) {
+        console.error('Delete user error:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Internal server error' 
+        });
+    }
+});
+
+// Create user endpoint (admin)
+app.post('/api/users', async (req, res) => {
+    try {
+        const {
+            firstName,
+            lastName,
+            email,
+            username,
+            password,
+            phone
+        } = req.body;
+
+        // Validate required fields
+        if (!firstName || !lastName || !email || !password) {
+            return res.status(400).json({
+                success: false,
+                message: 'First name, last name, email, and password are required'
+            });
+        }
+
+        // Check if user with email already exists
+        const existingUser = await User.findOne({ email });
+        if (existingUser) {
+            return res.status(400).json({
+                success: false,
+                message: 'User with this email already exists'
+            });
+        }
+
+        // Create new user
+        const user = new User({
+            firstName,
+            lastName,
+            email,
+            password, // Note: In production, this should be hashed
+            displayName: username || `${firstName} ${lastName}`,
+            location: '',
+            country: '',
+            biography: '',
+            socialLinks: {
+                facebook: '',
+                twitter: '',
+                instagram: '',
+                youtube: '',
+                linkedin: '',
+                website: ''
+            }
+        });
+
+        await user.save();
+
+        res.status(201).json({
+            success: true,
+            message: 'User created successfully',
+            user: {
+                id: user._id,
+                firstName: user.firstName,
+                lastName: user.lastName,
+                email: user.email,
+                displayName: user.displayName,
+                location: user.location,
+                country: user.country,
+                biography: user.biography,
+                socialLinks: user.socialLinks,
+                createdAt: user.createdAt
+            }
+        });
+    } catch (error) {
+        console.error('Create user error:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Internal server error' 
+        });
+    }
+});
+
 // Track creation endpoint
 app.post('/api/tracks', async (req, res) => {
     try {
@@ -670,9 +912,9 @@ app.post('/api/tracks', async (req, res) => {
             trackFile: trackFile || '',
             about: about || '',
             publish: publish || 'Private',
-            genreCategory: genreCategory || '',
-            beatCategory: beatCategory || '',
-            trackTags: trackTags || '',
+            genreCategory: Array.isArray(genreCategory) ? genreCategory : [],
+            beatCategory: Array.isArray(beatCategory) ? beatCategory : [],
+            trackTags: Array.isArray(trackTags) ? trackTags : [],
             seoTitle: seoTitle || '',
             metaKeyword: metaKeyword || '',
             metaDescription: metaDescription || ''
@@ -746,6 +988,107 @@ app.get('/api/tracks', async (req, res) => {
     }
 });
 
+// Update track endpoint
+app.put('/api/tracks/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const updateData = req.body;
+
+        const track = await Track.findById(id);
+        if (!track) {
+            return res.status(404).json({
+                success: false,
+                message: 'Track not found'
+            });
+        }
+
+        // Check if trackId is being changed and if it conflicts with existing track
+        if (updateData.trackId && updateData.trackId !== track.trackId) {
+            const existingTrack = await Track.findOne({ trackId: updateData.trackId, _id: { $ne: id } });
+            if (existingTrack) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Track with this ID already exists'
+                });
+            }
+        }
+
+        // Update track fields
+        Object.keys(updateData).forEach(key => {
+            if (updateData[key] !== undefined) {
+                track[key] = updateData[key];
+            }
+        });
+
+        track.updatedAt = new Date();
+        await track.save();
+
+        res.json({
+            success: true,
+            message: 'Track updated successfully',
+            track: {
+                id: track._id,
+                trackName: track.trackName,
+                trackId: track.trackId,
+                bpm: track.bpm,
+                trackKey: track.trackKey,
+                trackPrice: track.trackPrice,
+                musician: track.musician,
+                trackType: track.trackType,
+                moodType: track.moodType,
+                energyType: track.energyType,
+                instrument: track.instrument,
+                generatedTrackPlatform: track.generatedTrackPlatform,
+                trackImage: track.trackImage,
+                trackFile: track.trackFile,
+                about: track.about,
+                publish: track.publish,
+                genreCategory: track.genreCategory,
+                beatCategory: track.beatCategory,
+                trackTags: track.trackTags,
+                seoTitle: track.seoTitle,
+                metaKeyword: track.metaKeyword,
+                metaDescription: track.metaDescription,
+                updatedAt: track.updatedAt
+            }
+        });
+    } catch (error) {
+        console.error('Track update error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error',
+            details: error.message
+        });
+    }
+});
+
+// Delete track endpoint
+app.delete('/api/tracks/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const track = await Track.findByIdAndDelete(id);
+        if (!track) {
+            return res.status(404).json({
+                success: false,
+                message: 'Track not found'
+            });
+        }
+
+        res.json({
+            success: true,
+            message: 'Track deleted successfully'
+        });
+    } catch (error) {
+        console.error('Track delete error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error',
+            details: error.message
+        });
+    }
+});
+
 // Genre API endpoints
 app.post('/api/genres', async (req, res) => {
     try {
@@ -796,7 +1139,7 @@ app.post('/api/genres', async (req, res) => {
 // Get all genres endpoint
 app.get('/api/genres', async (req, res) => {
     try {
-        const genres = await Genre.find({ isActive: true }).sort({ name: 1 });
+        const genres = await Genre.find().sort({ name: 1 });
         res.json({
             success: true,
             genres: genres
@@ -866,23 +1209,18 @@ app.put('/api/genres/:id', async (req, res) => {
     }
 });
 
-// Delete genre endpoint (soft delete)
+// Delete genre endpoint (hard delete)
 app.delete('/api/genres/:id', async (req, res) => {
     try {
         const { id } = req.params;
 
-        const genre = await Genre.findById(id);
+        const genre = await Genre.findByIdAndDelete(id);
         if (!genre) {
             return res.status(404).json({
                 success: false,
                 message: 'Genre not found'
             });
         }
-
-        // Soft delete by setting isActive to false
-        genre.isActive = false;
-        genre.updatedAt = new Date();
-        await genre.save();
 
         res.json({
             success: true,
@@ -948,7 +1286,7 @@ app.post('/api/beats', async (req, res) => {
 // Get all beats endpoint
 app.get('/api/beats', async (req, res) => {
     try {
-        const beats = await Beat.find({ isActive: true }).sort({ name: 1 });
+        const beats = await Beat.find().sort({ name: 1 });
         res.json({
             success: true,
             beats: beats
@@ -1018,23 +1356,18 @@ app.put('/api/beats/:id', async (req, res) => {
     }
 });
 
-// Delete beat endpoint (soft delete)
+// Delete beat endpoint (hard delete)
 app.delete('/api/beats/:id', async (req, res) => {
     try {
         const { id } = req.params;
 
-        const beat = await Beat.findById(id);
+        const beat = await Beat.findByIdAndDelete(id);
         if (!beat) {
             return res.status(404).json({
                 success: false,
                 message: 'Beat not found'
             });
         }
-
-        // Soft delete by setting isActive to false
-        beat.isActive = false;
-        beat.updatedAt = new Date();
-        await beat.save();
 
         res.json({
             success: true,
@@ -1100,7 +1433,7 @@ app.post('/api/tags', async (req, res) => {
 // Get all tags endpoint
 app.get('/api/tags', async (req, res) => {
     try {
-        const tags = await Tag.find({ isActive: true }).sort({ name: 1 });
+        const tags = await Tag.find().sort({ name: 1 });
         res.json({
             success: true,
             tags: tags
@@ -1170,23 +1503,18 @@ app.put('/api/tags/:id', async (req, res) => {
     }
 });
 
-// Delete tag endpoint (soft delete)
+// Delete tag endpoint (hard delete)
 app.delete('/api/tags/:id', async (req, res) => {
     try {
         const { id } = req.params;
 
-        const tag = await Tag.findById(id);
+        const tag = await Tag.findByIdAndDelete(id);
         if (!tag) {
             return res.status(404).json({
                 success: false,
                 message: 'Tag not found'
             });
         }
-
-        // Soft delete by setting isActive to false
-        tag.isActive = false;
-        tag.updatedAt = new Date();
-        await tag.save();
 
         res.json({
             success: true,
@@ -1255,6 +1583,8 @@ app.post('/api/sound-kits', async (req, res) => {
             metaDescription: metaDescription || ''
         };
 
+        console.log('Kit image being stored:', kitImage);
+
         console.log('Creating sound kit with data:', soundKitData);
         
         const soundKit = new SoundKit(soundKitData);
@@ -1318,6 +1648,72 @@ app.get('/api/sound-kits', async (req, res) => {
     }
 });
 
+// Update sound kit endpoint
+app.put('/api/sound-kits/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const updateData = req.body;
+
+        const soundKit = await SoundKit.findById(id);
+        if (!soundKit) {
+            return res.status(404).json({
+                success: false,
+                message: 'Sound kit not found'
+            });
+        }
+
+        // Update fields if provided
+        Object.keys(updateData).forEach(key => {
+            if (updateData[key] !== undefined) {
+                soundKit[key] = updateData[key];
+            }
+        });
+        
+        soundKit.updatedAt = new Date();
+        await soundKit.save();
+
+        res.json({
+            success: true,
+            message: 'Sound kit updated successfully',
+            soundKit: soundKit
+        });
+    } catch (error) {
+        console.error('Update sound kit error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error'
+        });
+    }
+});
+
+// Delete sound kit endpoint
+app.delete('/api/sound-kits/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const soundKit = await SoundKit.findById(id);
+        if (!soundKit) {
+            return res.status(404).json({
+                success: false,
+                message: 'Sound kit not found'
+            });
+        }
+
+        await SoundKit.findByIdAndDelete(id);
+
+        res.json({
+            success: true,
+            message: 'Sound kit deleted successfully'
+        });
+    } catch (error) {
+        console.error('Delete sound kit error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error'
+        });
+    }
+});
+
 // Sound Kit Category API endpoints
 app.post('/api/sound-kit-categories', async (req, res) => {
     try {
@@ -1361,7 +1757,7 @@ app.post('/api/sound-kit-categories', async (req, res) => {
 
 app.get('/api/sound-kit-categories', async (req, res) => {
     try {
-        const categories = await SoundKitCategory.find({ isActive: true }).sort({ createdAt: -1 });
+        const categories = await SoundKitCategory.find().sort({ createdAt: -1 });
         res.json({
             success: true,
             categories: categories
@@ -1420,19 +1816,22 @@ app.put('/api/sound-kit-categories/:id', async (req, res) => {
 app.delete('/api/sound-kit-categories/:id', async (req, res) => {
     try {
         const { id } = req.params;
+        console.log('Backend: Received delete request for sound kit category ID:', id);
 
         const category = await SoundKitCategory.findById(id);
+        console.log('Backend: Found category:', category);
+        
         if (!category) {
+            console.log('Backend: Category not found');
             return res.status(404).json({
                 success: false,
                 message: 'Category not found'
             });
         }
 
-        // Soft delete
-        category.isActive = false;
-        category.updatedAt = new Date();
-        await category.save();
+        // Hard delete - actually remove from MongoDB
+        await SoundKitCategory.findByIdAndDelete(id);
+        console.log('Backend: Category permanently deleted from MongoDB');
 
         res.json({
             success: true,
@@ -1490,7 +1889,7 @@ app.post('/api/sound-kit-tags', async (req, res) => {
 
 app.get('/api/sound-kit-tags', async (req, res) => {
     try {
-        const tags = await SoundKitTag.find({ isActive: true }).sort({ createdAt: -1 });
+        const tags = await SoundKitTag.find().sort({ createdAt: -1 });
         res.json({
             success: true,
             tags: tags
@@ -1549,19 +1948,22 @@ app.put('/api/sound-kit-tags/:id', async (req, res) => {
 app.delete('/api/sound-kit-tags/:id', async (req, res) => {
     try {
         const { id } = req.params;
+        console.log('Backend: Received delete request for sound kit tag ID:', id);
 
         const tag = await SoundKitTag.findById(id);
+        console.log('Backend: Found tag:', tag);
+        
         if (!tag) {
+            console.log('Backend: Tag not found');
             return res.status(404).json({
                 success: false,
                 message: 'Tag not found'
             });
         }
 
-        // Soft delete
-        tag.isActive = false;
-        tag.updatedAt = new Date();
-        await tag.save();
+        // Hard delete - actually remove from MongoDB
+        await SoundKitTag.findByIdAndDelete(id);
+        console.log('Backend: Tag permanently deleted from MongoDB');
 
         res.json({
             success: true,
@@ -1569,6 +1971,163 @@ app.delete('/api/sound-kit-tags/:id', async (req, res) => {
         });
     } catch (error) {
         console.error('Delete sound kit tag error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error'
+        });
+    }
+});
+
+// GridFS Image Upload Endpoint
+app.post('/api/upload-image', upload.single('image'), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({
+                success: false,
+                message: 'No image file provided'
+            });
+        }
+
+        // Create a readable stream from the buffer
+        const readableStream = new require('stream').Readable();
+        readableStream.push(req.file.buffer);
+        readableStream.push(null);
+
+        // Upload to GridFS
+        const uploadStream = bucket.openUploadStream(req.file.originalname, {
+            metadata: {
+                contentType: req.file.mimetype,
+                originalName: req.file.originalname,
+                uploadedAt: new Date()
+            }
+        });
+
+        // Pipe the file to GridFS
+        readableStream.pipe(uploadStream);
+
+        uploadStream.on('error', (error) => {
+            console.error('GridFS upload error:', error);
+            res.status(500).json({
+                success: false,
+                message: 'Failed to upload image'
+            });
+        });
+
+        uploadStream.on('finish', () => {
+            res.json({
+                success: true,
+                message: 'Image uploaded successfully',
+                fileId: uploadStream.id,
+                filename: req.file.originalname,
+                contentType: req.file.mimetype
+            });
+        });
+
+    } catch (error) {
+        console.error('Upload image error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error'
+        });
+    }
+});
+
+// GridFS Image Download Endpoint
+app.get('/api/image/:fileId', async (req, res) => {
+    try {
+        const { fileId } = req.params;
+        
+        if (!mongoose.Types.ObjectId.isValid(fileId)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid file ID'
+            });
+        }
+
+        // Find the file in GridFS
+        const files = bucket.find({ _id: new mongoose.Types.ObjectId(fileId) });
+        const fileArray = await files.toArray();
+
+        if (fileArray.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'Image not found'
+            });
+        }
+
+        const file = fileArray[0];
+        
+        // Set appropriate headers
+        res.set({
+            'Content-Type': file.metadata?.contentType || 'image/jpeg',
+            'Content-Length': file.length,
+            'Content-Disposition': `inline; filename="${file.metadata?.originalName || file.filename}"`
+        });
+
+        // Create download stream
+        const downloadStream = bucket.openDownloadStream(new mongoose.Types.ObjectId(fileId));
+        downloadStream.pipe(res);
+
+    } catch (error) {
+        console.error('Download image error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error'
+        });
+    }
+});
+
+// GridFS Image Delete Endpoint
+app.delete('/api/image/:fileId', async (req, res) => {
+    try {
+        const { fileId } = req.params;
+        
+        if (!mongoose.Types.ObjectId.isValid(fileId)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid file ID'
+            });
+        }
+
+        // Delete from GridFS
+        await bucket.delete(new mongoose.Types.ObjectId(fileId));
+
+        res.json({
+            success: true,
+            message: 'Image deleted successfully'
+        });
+
+    } catch (error) {
+        console.error('Delete image error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error'
+        });
+    }
+});
+
+// GridFS List Images Endpoint
+app.get('/api/images', async (req, res) => {
+    try {
+        const files = bucket.find({});
+        const fileArray = await files.toArray();
+        
+        const images = fileArray.map(file => ({
+            id: file._id,
+            filename: file.filename,
+            originalName: file.metadata?.originalName || file.filename,
+            contentType: file.metadata?.contentType || 'image/jpeg',
+            size: file.length,
+            uploadedAt: file.metadata?.uploadedAt || file.uploadDate
+        }));
+
+        res.json({
+            success: true,
+            images: images
+        });
+
+    } catch (error) {
+        console.error('List images error:', error);
         res.status(500).json({
             success: false,
             message: 'Internal server error'
