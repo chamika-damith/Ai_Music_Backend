@@ -138,6 +138,10 @@ const trackSchema = new mongoose.Schema({
     trim: true,
     maxlength: 100
   },
+  musicianProfilePicture: {
+    type: String,
+    trim: true
+  },
   trackType: {
     type: String,
     required: true,
@@ -353,6 +357,15 @@ const soundKitSchema = new mongoose.Schema({
     type: String,
     trim: true,
     maxlength: 100
+  },
+  musician: {
+    type: String,
+    trim: true,
+    maxlength: 100
+  },
+  musicianProfilePicture: {
+    type: String,
+    trim: true
   },
   kitType: {
     type: String,
@@ -2135,8 +2148,133 @@ app.get('/api/images', async (req, res) => {
     }
 });
 
+// Get Musicians with Profile Pictures Endpoint
+app.get('/api/musicians', async (req, res) => {
+    try {
+        // Aggregate tracks to get unique musicians with their profile pictures
+        const musicians = await Track.aggregate([
+            {
+                $match: {
+                    musician: { $exists: true, $ne: null, $ne: '' }
+                }
+            },
+            {
+                $group: {
+                    _id: '$musician',
+                    name: { $first: '$musician' },
+                    profilePicture: { $first: '$musicianProfilePicture' },
+                    trackCount: { $sum: 1 },
+                    firstTrack: { $first: '$$ROOT' }
+                }
+            },
+            {
+                $sort: { name: 1 }
+            }
+        ]);
+
+        res.json({
+            success: true,
+            musicians: musicians
+        });
+
+    } catch (error) {
+        console.error('Get musicians error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error'
+        });
+    }
+});
+
+// Get Specific Musician by ID Endpoint
+app.get('/api/musicians/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        // Decode the URL parameter (musician name)
+        const musicianName = decodeURIComponent(id);
+        console.log('Looking for musician:', musicianName);
+        
+        // Find tracks by this musician name (exact match first, then case-insensitive)
+        let tracks = await Track.find({ 
+            musician: musicianName
+        });
+        
+        // If no exact match, try case-insensitive search
+        if (tracks.length === 0) {
+            tracks = await Track.find({ 
+                musician: { $regex: new RegExp(musicianName, 'i') }
+            });
+        }
+
+        console.log('Found tracks:', tracks.length);
+
+        if (tracks.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'Musician not found'
+            });
+        }
+
+        // Get musician details from first track
+        const firstTrack = tracks[0];
+        const musician = {
+            _id: firstTrack.musician, // Use musician name as ID
+            name: firstTrack.musician,
+            profilePicture: firstTrack.musicianProfilePicture,
+            bio: firstTrack.about || 'No bio available',
+            country: firstTrack.country || 'Unknown',
+            genre: firstTrack.genreCategory || 'Unknown',
+            socialLinks: {
+                website: firstTrack.website || '',
+                instagram: firstTrack.instagram || '',
+                twitter: firstTrack.twitter || '',
+                youtube: firstTrack.youtube || ''
+            },
+            trackCount: tracks.length
+        };
+
+        console.log('Returning musician:', musician);
+
+        res.json({
+            success: true,
+            musician: musician
+        });
+
+    } catch (error) {
+        console.error('Get musician by ID error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error'
+        });
+    }
+});
+
 app.get('/api/health', (req, res) => {
     res.json({ status: 'OK', message: 'Server is running' });
+});
+
+// Test endpoint to check if tracks exist
+app.get('/api/test-tracks', async (req, res) => {
+    try {
+        const tracks = await Track.find().limit(5);
+        res.json({
+            success: true,
+            count: tracks.length,
+            tracks: tracks.map(t => ({
+                _id: t._id,
+                trackName: t.trackName,
+                musician: t.musician,
+                musicianProfilePicture: t.musicianProfilePicture
+            }))
+        });
+    } catch (error) {
+        console.error('Test tracks error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error'
+        });
+    }
 });
 
 app.listen(3001, () => {
