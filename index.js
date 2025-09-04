@@ -89,6 +89,10 @@ const userSchema = new mongoose.Schema({
     trim: true,
     maxlength: 500
   },
+  profilePicture: {
+    type: String,
+    trim: true
+  },
   socialLinks: {
     facebook: { type: String, trim: true },
     twitter: { type: String, trim: true },
@@ -617,13 +621,59 @@ app.post('/api/signin', async (req, res) => {
     }
 });
 
-app.put('/api/profile/:userId', async (req, res) => {
+// Get single user by ID endpoint
+app.get('/api/users/:userId', async (req, res) => {
     try {
         const { userId } = req.params;
-        const { firstName, lastName, displayName, location, country, biography, socialLinks } = req.body;
+        console.log('Get user request for ID:', userId);
         
         const user = await User.findById(userId);
         if (!user) {
+            console.log('User not found:', userId);
+            return res.status(404).json({ 
+                success: false, 
+                message: 'User not found' 
+            });
+        }
+        
+        console.log('User found:', { id: user._id, firstName: user.firstName, profilePicture: user.profilePicture });
+        
+        res.json({ 
+            success: true, 
+            user: {
+                id: user._id,
+                firstName: user.firstName,
+                lastName: user.lastName,
+                email: user.email,
+                displayName: user.displayName,
+                location: user.location,
+                country: user.country,
+                biography: user.biography,
+                profilePicture: user.profilePicture,
+                socialLinks: user.socialLinks,
+                createdAt: user.createdAt
+            }
+        });
+    } catch (error) {
+        console.error('Get user error:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Internal server error' 
+        });
+    }
+});
+
+app.put('/api/profile/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const { firstName, lastName, displayName, location, country, biography, profilePicture, socialLinks } = req.body;
+        
+        console.log('Profile update request for user:', userId);
+        console.log('Profile data received:', { firstName, lastName, displayName, location, country, biography, profilePicture, socialLinks });
+        
+        const user = await User.findById(userId);
+        if (!user) {
+            console.log('User not found:', userId);
             return res.status(404).json({ 
                 success: false, 
                 message: 'User not found' 
@@ -637,9 +687,13 @@ app.put('/api/profile/:userId', async (req, res) => {
         user.location = location || user.location;
         user.country = country || user.country;
         user.biography = biography || user.biography;
+        user.profilePicture = profilePicture || user.profilePicture;
         user.socialLinks = socialLinks || user.socialLinks;
         
+        console.log('Updated user profile picture:', user.profilePicture);
+        
         await user.save();
+        console.log('User profile saved successfully');
         
         res.json({ 
             success: true, 
@@ -653,6 +707,7 @@ app.put('/api/profile/:userId', async (req, res) => {
                 location: user.location,
                 country: user.country,
                 biography: user.biography,
+                profilePicture: user.profilePicture,
                 socialLinks: user.socialLinks
             }
         });
@@ -670,6 +725,11 @@ app.get('/api/users', async (req, res) => {
     try {
         const users = await User.find({}).select('-password'); // Exclude password field
         
+        console.log('Get all users request - found', users.length, 'users');
+        users.forEach(user => {
+            console.log('User:', { id: user._id, firstName: user.firstName, email: user.email, profilePicture: user.profilePicture });
+        });
+        
         res.status(200).json({
             success: true,
             users: users.map(user => ({
@@ -681,6 +741,7 @@ app.get('/api/users', async (req, res) => {
                 location: user.location || '',
                 country: user.country || '',
                 biography: user.biography || '',
+                profilePicture: user.profilePicture || '',
                 socialLinks: user.socialLinks || {},
                 createdAt: user.createdAt
             }))
@@ -1994,7 +2055,11 @@ app.delete('/api/sound-kit-tags/:id', async (req, res) => {
 // GridFS Image Upload Endpoint
 app.post('/api/upload-image', upload.single('image'), async (req, res) => {
     try {
+        console.log('Image upload request received');
+        console.log('File info:', req.file ? { name: req.file.originalname, size: req.file.size, mimetype: req.file.mimetype } : 'No file');
+        
         if (!req.file) {
+            console.log('No image file provided');
             return res.status(400).json({
                 success: false,
                 message: 'No image file provided'
@@ -2027,10 +2092,16 @@ app.post('/api/upload-image', upload.single('image'), async (req, res) => {
         });
 
         uploadStream.on('finish', () => {
+            const imageUrl = `${req.protocol}://${req.get('host')}/api/image/${uploadStream.id}`;
+            console.log('Image uploaded successfully to GridFS');
+            console.log('File ID:', uploadStream.id);
+            console.log('Image URL:', imageUrl);
+            
             res.json({
                 success: true,
                 message: 'Image uploaded successfully',
                 fileId: uploadStream.id,
+                imageUrl: imageUrl,
                 filename: req.file.originalname,
                 contentType: req.file.mimetype
             });
