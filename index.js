@@ -5,7 +5,38 @@ const cors = require('cors');
 const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
+const AWS = require('aws-sdk');
 const app = express();
+
+// Configure AWS S3
+AWS.config.update({
+  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  region: process.env.AWS_REGION || 'us-east-1'
+});
+
+const s3 = new AWS.S3();
+
+// Helper function to upload file to S3
+const uploadToS3 = async (file, folder = 'tracks') => {
+  const fileName = `${folder}/${Date.now()}_${file.originalname}`;
+  
+  const params = {
+    Bucket: process.env.AWS_S3_BUCKET_NAME,
+    Key: fileName,
+    Body: file.buffer,
+    ContentType: file.mimetype,
+    ACL: 'public-read' // Make file publicly accessible
+  };
+
+  try {
+    const result = await s3.upload(params).promise();
+    return result.Location; // Returns the public URL of the uploaded file
+  } catch (error) {
+    console.error('S3 upload error:', error);
+    throw error;
+  }
+};
 
 app.use(cors());
 app.use(express.json());
@@ -35,6 +66,22 @@ const upload = multer({
       cb(null, true);
     } else {
       cb(new Error('Only image files are allowed!'), false);
+    }
+  }
+});
+
+// Multer configuration for MP3 files
+const uploadAudio = multer({
+  storage: storage,
+  limits: {
+    fileSize: 50 * 1024 * 1024, // 50MB limit for audio files
+  },
+  fileFilter: (req, file, cb) => {
+    // Allow only MP3 audio files
+    if (file.mimetype === 'audio/mpeg' || file.mimetype === 'audio/mp3') {
+      cb(null, true);
+    } else {
+      cb(new Error('Only MP3 audio files are allowed!'), false);
     }
   }
 });
@@ -931,10 +978,11 @@ app.post('/api/users', async (req, res) => {
     }
 });
 
-// Track creation endpoint
-app.post('/api/tracks', async (req, res) => {
+// Track creation endpoint with MP3 upload
+app.post('/api/tracks', uploadAudio.single('trackFile'), async (req, res) => {
     try {
         console.log('Received track data:', req.body);
+        console.log('Received file:', req.file ? { name: req.file.originalname, size: req.file.size } : 'No file');
         
         const {
             trackName,
@@ -949,7 +997,6 @@ app.post('/api/tracks', async (req, res) => {
             instrument,
             generatedTrackPlatform,
             trackImage,
-            trackFile,
             about,
             publish,
             genreCategory,
@@ -959,6 +1006,21 @@ app.post('/api/tracks', async (req, res) => {
             metaKeyword,
             metaDescription
         } = req.body;
+
+        // Upload MP3 file to S3 if provided
+        let trackFileUrl = '';
+        if (req.file) {
+            try {
+                trackFileUrl = await uploadToS3(req.file, 'tracks');
+                console.log('Track file uploaded to S3:', trackFileUrl);
+            } catch (uploadError) {
+                console.error('Failed to upload track file to S3:', uploadError);
+                return res.status(500).json({
+                    success: false,
+                    message: 'Failed to upload track file'
+                });
+            }
+        }
 
         // Check if track with same trackId already exists
         const existingTrack = await Track.findOne({ trackId });
@@ -983,7 +1045,7 @@ app.post('/api/tracks', async (req, res) => {
             instrument: instrument || '',
             generatedTrackPlatform: generatedTrackPlatform || '',
             trackImage: trackImage || '',
-            trackFile: trackFile || '',
+            trackFile: trackFileUrl || '', // Use S3 URL instead of local path
             about: about || '',
             publish: publish || 'Private',
             genreCategory: Array.isArray(genreCategory) ? genreCategory : [],
