@@ -2,41 +2,9 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
-
 const { createClient } = require('@supabase/supabase-js');
 const { v4: uuidv4 } = require('uuid');
-
 const app = express();
-
-// Configure AWS S3
-AWS.config.update({
-  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  region: process.env.AWS_REGION || 'us-east-1'
-});
-
-const s3 = new AWS.S3();
-
-// Helper function to upload file to S3
-const uploadToS3 = async (file, folder = 'tracks') => {
-  const fileName = `${folder}/${Date.now()}_${file.originalname}`;
-  
-  const params = {
-    Bucket: process.env.AWS_S3_BUCKET_NAME,
-    Key: fileName,
-    Body: file.buffer,
-    ContentType: file.mimetype,
-    ACL: 'public-read' // Make file publicly accessible
-  };
-
-  try {
-    const result = await s3.upload(params).promise();
-    return result.Location; // Returns the public URL of the uploaded file
-  } catch (error) {
-    console.error('S3 upload error:', error);
-    throw error;
-  }
-};
 
 app.use(cors());
 app.use(express.json());
@@ -47,10 +15,28 @@ const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 if (!supabaseUrl || !supabaseServiceKey) {
     console.error('Missing Supabase configuration. Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in your .env file');
+    console.error('Example .env file:');
+    console.error('SUPABASE_URL=https://yeoaploxakfvvcubyhaz.supabase.co');
+    console.error('SUPABASE_SERVICE_ROLE_KEY=your_service_role_key_here');
     process.exit(1);
 }
 
-const supabase = createClient(supabaseUrl, supabaseServiceKey);
+const supabase = createClient(supabaseUrl, supabaseServiceKey, {
+    auth: {
+        autoRefreshToken: false,
+        persistSession: false
+    }
+});
+
+// S3-Compatible Storage Configuration
+const STORAGE_BUCKET = 'uploads';
+const STORAGE_ENDPOINT = 'https://yeoaploxakfvvcubyhaz.storage.supabase.co/storage/v1/s3';
+const STORAGE_REGION = 'us-east-2';
+
+console.log('Supabase Storage Configuration:');
+console.log('- Bucket:', STORAGE_BUCKET);
+console.log('- Endpoint:', STORAGE_ENDPOINT);
+console.log('- Region:', STORAGE_REGION);
 
 // Multer configuration for file uploads
 const storage = multer.memoryStorage();
@@ -69,17 +55,50 @@ const upload = multer({
   }
 });
 
+// Test Supabase connection and create storage bucket if needed
+async function initializeStorage() {
+    try {
+        // Test database connection
+        const { error: dbError } = await supabase.from('users').select('count', { count: 'exact', head: true });
+        if (dbError) {
+            console.error('Supabase database connection error:', dbError.message);
+        } else {
+            console.log('✅ Connected to Supabase database successfully');
+        }
 
-// Test Supabase connection
-supabase.from('users').select('count', { count: 'exact', head: true })
-  .then(({ error }) => {
-    if (error) {
-      console.error('Supabase connection error:', error.message);
-    } else {
-      console.log('Connected to Supabase successfully');
+        // Test storage connection and create bucket if needed
+        const { data: buckets, error: bucketsError } = await supabase.storage.listBuckets();
+        if (bucketsError) {
+            console.error('Supabase storage connection error:', bucketsError.message);
+        } else {
+            console.log('✅ Connected to Supabase storage successfully');
+            
+            // Check if uploads bucket exists
+            const uploadsBucket = buckets.find(bucket => bucket.name === STORAGE_BUCKET);
+            if (!uploadsBucket) {
+                console.log(`Creating storage bucket: ${STORAGE_BUCKET}`);
+                const { data: newBucket, error: createError } = await supabase.storage.createBucket(STORAGE_BUCKET, {
+                    public: true,
+                    allowedMimeTypes: ['image/*', 'audio/*'],
+                    fileSizeLimit: 52428800 // 50MB
+                });
+                
+                if (createError) {
+                    console.error('Error creating storage bucket:', createError.message);
+                } else {
+                    console.log(`✅ Storage bucket '${STORAGE_BUCKET}' created successfully`);
+                }
+            } else {
+                console.log(`✅ Storage bucket '${STORAGE_BUCKET}' already exists`);
+            }
+        }
+    } catch (error) {
+        console.error('Storage initialization error:', error);
     }
-  });
+}
 
+// Initialize storage on startup
+initializeStorage();
 
 // Helper function to handle database errors
 const handleDatabaseError = (error, res, operation = 'operation') => {
@@ -446,12 +465,184 @@ app.post('/api/users', async (req, res) => {
     }
 });
 
-
 // Track Management APIs
 app.post('/api/tracks', async (req, res) => {
     try {
         const trackData = toSnakeCase(req.body);
         
+        // Check if track with same trackId already exists
+        if (trackData.track_id) {
+            const { data: existingTrack } = await supabase
+                .from('tracks')
+                .select('id')
+                .eq('track_id', trackData.track_id)
+                .single();
+                
+            if (existingTrack) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Track with this ID already exists'
+                });
+            }
+        }
+
+        const { data: track, error } = await supabase
+            .from('tracks')
+            .insert([trackData])
+            .select()
+            .single();
+            
+        if (error) {
+            return handleDatabaseError(error, res, 'track creation');
+        }
+
+        res.status(201).json({
+            success: true,
+            message: 'Track created successfully',
+            track: toCamelCase(track)
+        });
+    } catch (error) {
+        console.error('Track creation error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error'
+        });
+    }
+});
+
+// Create track with file uploads (image and audio)
+app.post('/api/tracks/upload', upload.fields([
+    { name: 'audio', maxCount: 1 },
+    { name: 'image', maxCount: 1 }
+]), async (req, res) => {
+    try {
+        console.log('Track with files upload request received');
+        console.log('Files:', req.files);
+        console.log('Body:', req.body);
+
+        const trackData = toSnakeCase(req.body);
+        let audioUrl = '';
+        let imageUrl = '';
+
+        // Handle array fields that come as indexed properties from FormData
+        const arrayFields = ['genre_category', 'beat_category', 'track_tags'];
+        arrayFields.forEach(field => {
+            const items = [];
+            let index = 0;
+            while (req.body[`${field}[${index}]`]) {
+                items.push(req.body[`${field}[${index}]`]);
+                index++;
+            }
+            if (items.length > 0) {
+                trackData[field] = items;
+            }
+        });
+
+        // Handle audio file upload
+        if (req.files && req.files['audio'] && req.files['audio'][0]) {
+            const audioFile = req.files['audio'][0];
+            
+            // Validate audio file type
+            if (!audioFile.mimetype.startsWith('audio/')) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Invalid audio file type. Please upload an audio file.'
+                });
+            }
+            
+            // Validate file size (50MB limit)
+            if (audioFile.size > 50 * 1024 * 1024) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Audio file too large. Maximum size is 50MB.'
+                });
+            }
+            
+            const audioExt = audioFile.originalname.split('.').pop();
+            const audioFileName = `${uuidv4()}.${audioExt}`;
+            const audioFilePath = `audio/${audioFileName}`;
+
+            const { data: audioData, error: audioError } = await supabase.storage
+                .from(STORAGE_BUCKET)
+                .upload(audioFilePath, audioFile.buffer, {
+                    contentType: audioFile.mimetype,
+                    metadata: {
+                        originalName: audioFile.originalname,
+                        uploadedAt: new Date().toISOString(),
+                        fileSize: audioFile.size
+                    }
+                });
+
+            if (audioError) {
+                console.error('Audio upload error:', audioError);
+                return res.status(500).json({
+                    success: false,
+                    message: 'Failed to upload audio file: ' + audioError.message
+                });
+            }
+
+            // Get public URL for audio
+            const { data: { publicUrl: audioPublicUrl } } = supabase.storage
+                .from(STORAGE_BUCKET)
+                .getPublicUrl(audioFilePath);
+
+            audioUrl = audioPublicUrl;
+            trackData.track_file = audioUrl;
+            console.log('Audio uploaded successfully:', audioUrl);
+        }
+
+        // Handle image file upload
+        if (req.files && req.files['image'] && req.files['image'][0]) {
+            const imageFile = req.files['image'][0];
+            
+            // Validate image file type
+            if (!imageFile.mimetype.startsWith('image/')) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Invalid image file type. Please upload an image file.'
+                });
+            }
+            
+            // Validate file size (10MB limit for images)
+            if (imageFile.size > 10 * 1024 * 1024) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Image file too large. Maximum size is 10MB.'
+                });
+            }
+            
+            const imageExt = imageFile.originalname.split('.').pop();
+            const imageFileName = `${uuidv4()}.${imageExt}`;
+            const imageFilePath = `images/${imageFileName}`;
+
+            const { data: imageData, error: imageError } = await supabase.storage
+                .from(STORAGE_BUCKET)
+                .upload(imageFilePath, imageFile.buffer, {
+                    contentType: imageFile.mimetype,
+                    metadata: {
+                        originalName: imageFile.originalname,
+                        uploadedAt: new Date().toISOString(),
+                        fileSize: imageFile.size
+                    }
+                });
+
+            if (imageError) {
+                console.error('Image upload error:', imageError);
+                return res.status(500).json({
+                    success: false,
+                    message: 'Failed to upload image file: ' + imageError.message
+                });
+            }
+
+            // Get public URL for image
+            const { data: { publicUrl: imagePublicUrl } } = supabase.storage
+                .from(STORAGE_BUCKET)
+                .getPublicUrl(imageFilePath);
+
+            imageUrl = imagePublicUrl;
+            trackData.track_image = imageUrl;
+            console.log('Image uploaded successfully:', imageUrl);
+        }
 
         // Check if track with same trackId already exists
         if (trackData.track_id) {
@@ -469,7 +660,7 @@ app.post('/api/tracks', async (req, res) => {
             }
         }
 
-
+        // Insert track data into database
         const { data: track, error } = await supabase
             .from('tracks')
             .insert([trackData])
@@ -480,20 +671,22 @@ app.post('/api/tracks', async (req, res) => {
             return handleDatabaseError(error, res, 'track creation');
         }
 
-
         res.status(201).json({
             success: true,
-            message: 'Track created successfully',
-            track: toCamelCase(track)
+            message: 'Track created successfully with files uploaded',
+            track: toCamelCase(track),
+            audioUrl,
+            imageUrl
         });
     } catch (error) {
-        console.error('Track creation error:', error);
+        console.error('Track with files creation error:', error);
         res.status(500).json({
             success: false,
             message: 'Internal server error'
         });
     }
 });
+
 
 app.get('/api/tracks', async (req, res) => {
     try {
@@ -569,6 +762,17 @@ app.put('/api/tracks/:id', async (req, res) => {
 app.delete('/api/tracks/:id', async (req, res) => {
     try {
         const { id } = req.params;
+        
+        console.log('Delete track request - ID:', id);
+        console.log('Delete track request - ID type:', typeof id);
+        
+        // Validate ID parameter
+        if (!id || id === 'undefined' || id === 'null') {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid track ID provided'
+            });
+        }
 
         const { error } = await supabase
             .from('tracks')
@@ -576,6 +780,7 @@ app.delete('/api/tracks/:id', async (req, res) => {
             .eq('id', id);
             
         if (error) {
+            console.error('Database delete error:', error);
             return handleDatabaseError(error, res, 'track delete');
         }
 
@@ -1044,6 +1249,183 @@ app.delete('/api/tags/:id', async (req, res) => {
     }
 });
 
+// Create sound kit with file uploads (image and audio)
+app.post('/api/sound-kits/upload', upload.fields([
+    { name: 'kitFile', maxCount: 1 },
+    { name: 'image', maxCount: 1 }
+]), async (req, res) => {
+    try {
+        console.log('Sound kit with files upload request received');
+        console.log('Files:', req.files);
+        console.log('Body:', req.body);
+
+        const soundKitData = toSnakeCase(req.body);
+        let kitFileUrl = '';
+        let imageUrl = '';
+
+        // Handle array fields that come as indexed properties from FormData
+        const arrayFields = ['tags', 'category'];
+        arrayFields.forEach(field => {
+            const items = [];
+            let index = 0;
+            while (req.body[`${field}[${index}]`]) {
+                items.push(req.body[`${field}[${index}]`]);
+                index++;
+            }
+            if (items.length > 0) {
+                soundKitData[field] = items;
+            }
+        });
+
+        // Handle kit file upload
+        if (req.files && req.files['kitFile'] && req.files['kitFile'][0]) {
+            const kitFile = req.files['kitFile'][0];
+            
+            // Validate audio file type
+            if (!kitFile.mimetype.startsWith('audio/')) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Invalid audio file type. Please upload an audio file.'
+                });
+            }
+            
+            // Validate file size (50MB limit)
+            if (kitFile.size > 50 * 1024 * 1024) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Audio file too large. Maximum size is 50MB.'
+                });
+            }
+            
+            const kitFileExt = kitFile.originalname.split('.').pop();
+            const kitFileName = `${uuidv4()}.${kitFileExt}`;
+            const kitFilePath = `audio/${kitFileName}`;
+
+            const { data: kitFileData, error: kitFileError } = await supabase.storage
+                .from(STORAGE_BUCKET)
+                .upload(kitFilePath, kitFile.buffer, {
+                    contentType: kitFile.mimetype,
+                    metadata: {
+                        originalName: kitFile.originalname,
+                        uploadedAt: new Date().toISOString(),
+                        fileSize: kitFile.size
+                    }
+                });
+
+            if (kitFileError) {
+                console.error('Kit file upload error:', kitFileError);
+                return res.status(500).json({
+                    success: false,
+                    message: 'Failed to upload kit file: ' + kitFileError.message
+                });
+            }
+
+            // Get public URL for kit file
+            const { data: { publicUrl: kitFilePublicUrl } } = supabase.storage
+                .from(STORAGE_BUCKET)
+                .getPublicUrl(kitFilePath);
+
+            kitFileUrl = kitFilePublicUrl;
+            soundKitData.kit_file = kitFileUrl;
+            console.log('Kit file uploaded successfully:', kitFileUrl);
+        }
+
+        // Handle image file upload
+        if (req.files && req.files['image'] && req.files['image'][0]) {
+            const imageFile = req.files['image'][0];
+            
+            // Validate image file type
+            if (!imageFile.mimetype.startsWith('image/')) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Invalid image file type. Please upload an image file.'
+                });
+            }
+            
+            // Validate file size (10MB limit for images)
+            if (imageFile.size > 10 * 1024 * 1024) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Image file too large. Maximum size is 10MB.'
+                });
+            }
+            
+            const imageExt = imageFile.originalname.split('.').pop();
+            const imageFileName = `${uuidv4()}.${imageExt}`;
+            const imageFilePath = `images/${imageFileName}`;
+
+            const { data: imageData, error: imageError } = await supabase.storage
+                .from(STORAGE_BUCKET)
+                .upload(imageFilePath, imageFile.buffer, {
+                    contentType: imageFile.mimetype,
+                    metadata: {
+                        originalName: imageFile.originalname,
+                        uploadedAt: new Date().toISOString(),
+                        fileSize: imageFile.size
+                    }
+                });
+
+            if (imageError) {
+                console.error('Image upload error:', imageError);
+                return res.status(500).json({
+                    success: false,
+                    message: 'Failed to upload image file: ' + imageError.message
+                });
+            }
+
+            // Get public URL for image
+            const { data: { publicUrl: imagePublicUrl } } = supabase.storage
+                .from(STORAGE_BUCKET)
+                .getPublicUrl(imageFilePath);
+
+            imageUrl = imagePublicUrl;
+            soundKitData.kit_image = imageUrl;
+            console.log('Image uploaded successfully:', imageUrl);
+        }
+
+        // Check if sound kit with same kitId already exists
+        if (soundKitData.kit_id) {
+            const { data: existingSoundKit } = await supabase
+                .from('sound_kits')
+                .select('id')
+                .eq('kit_id', soundKitData.kit_id)
+                .single();
+                
+            if (existingSoundKit) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Sound kit with this ID already exists'
+                });
+            }
+        }
+
+        // Insert sound kit data into database
+        const { data: soundKit, error } = await supabase
+            .from('sound_kits')
+            .insert([soundKitData])
+            .select()
+            .single();
+            
+        if (error) {
+            return handleDatabaseError(error, res, 'sound kit creation');
+        }
+
+        res.status(201).json({
+            success: true,
+            message: 'Sound kit created successfully with files uploaded',
+            soundKit: toCamelCase(soundKit),
+            kitFileUrl,
+            imageUrl
+        });
+    } catch (error) {
+        console.error('Sound kit with files creation error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Internal server error'
+        });
+    }
+});
+
 // Sound Kit Management APIs
 app.post('/api/sound-kits', async (req, res) => {
     try {
@@ -1147,6 +1529,17 @@ app.put('/api/sound-kits/:id', async (req, res) => {
 app.delete('/api/sound-kits/:id', async (req, res) => {
     try {
         const { id } = req.params;
+        
+        console.log('Delete sound kit request - ID:', id);
+        console.log('Delete sound kit request - ID type:', typeof id);
+        
+        // Validate ID parameter
+        if (!id || id === 'undefined' || id === 'null') {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid sound kit ID provided'
+            });
+        }
 
         const { error } = await supabase
             .from('sound_kits')
@@ -1154,6 +1547,7 @@ app.delete('/api/sound-kits/:id', async (req, res) => {
             .eq('id', id);
             
         if (error) {
+            console.error('Database delete error:', error);
             return handleDatabaseError(error, res, 'sound kit delete');
         }
 
@@ -1443,7 +1837,7 @@ app.post('/api/upload-image', upload.single('image'), async (req, res) => {
         const filePath = `images/${fileName}`;
 
         const { data, error } = await supabase.storage
-            .from('uploads')
+            .from(STORAGE_BUCKET)
             .upload(filePath, req.file.buffer, {
                 contentType: req.file.mimetype,
                 metadata: {
@@ -1462,7 +1856,7 @@ app.post('/api/upload-image', upload.single('image'), async (req, res) => {
 
         // Get public URL
         const { data: { publicUrl } } = supabase.storage
-            .from('uploads')
+            .from(STORAGE_BUCKET)
             .getPublicUrl(filePath);
 
         console.log('Image uploaded successfully to Supabase Storage');
@@ -1505,7 +1899,7 @@ app.post('/api/upload-audio', upload.single('audio'), async (req, res) => {
         const filePath = `audio/${fileName}`;
 
         const { data, error } = await supabase.storage
-            .from('uploads')
+            .from(STORAGE_BUCKET)
             .upload(filePath, req.file.buffer, {
                 contentType: req.file.mimetype,
                 metadata: {
@@ -1524,7 +1918,7 @@ app.post('/api/upload-audio', upload.single('audio'), async (req, res) => {
 
         // Get public URL
         const { data: { publicUrl } } = supabase.storage
-            .from('uploads')
+            .from(STORAGE_BUCKET)
             .getPublicUrl(filePath);
 
         console.log('Audio uploaded successfully to Supabase Storage');
@@ -1551,13 +1945,13 @@ app.post('/api/upload-audio', upload.single('audio'), async (req, res) => {
 });
 
 // Get file info from Supabase Storage
-app.get('/api/file', async (req, res) => {
+app.get('/api/file/:filePath(*)', async (req, res) => {
     try {
-        const filePath = req.query.path;
+        const filePath = req.params.filePath;
         
         // Get public URL for the file
         const { data: { publicUrl } } = supabase.storage
-            .from('uploads')
+            .from(STORAGE_BUCKET)
             .getPublicUrl(filePath);
 
         // Redirect to the public URL
@@ -1573,12 +1967,12 @@ app.get('/api/file', async (req, res) => {
 });
 
 // Delete file from Supabase Storage
-app.delete('/api/file', async (req, res) => {
+app.delete('/api/file/:filePath(*)', async (req, res) => {
     try {
-        const filePath = req.query.path;
+        const filePath = req.params.filePath;
         
         const { error } = await supabase.storage
-            .from('uploads')
+            .from(STORAGE_BUCKET)
             .remove([filePath]);
 
         if (error) {
@@ -1590,7 +1984,7 @@ app.delete('/api/file', async (req, res) => {
         }
 
         res.json({
-            success: true,
+            success: true, 
             message: 'File deleted successfully'
         });
 
@@ -1607,7 +2001,7 @@ app.delete('/api/file', async (req, res) => {
 app.get('/api/files', async (req, res) => {
     try {
         const { data: files, error } = await supabase.storage
-            .from('uploads')
+            .from(STORAGE_BUCKET)
             .list('', {
                 limit: 100,
                 offset: 0
@@ -1626,7 +2020,7 @@ app.get('/api/files', async (req, res) => {
             size: file.metadata?.size,
             contentType: file.metadata?.mimetype,
             lastModified: file.updated_at,
-            publicUrl: supabase.storage.from('uploads').getPublicUrl(file.name).data.publicUrl
+            publicUrl: supabase.storage.from(STORAGE_BUCKET).getPublicUrl(file.name).data.publicUrl
         }));
 
         res.json({
@@ -1733,7 +2127,63 @@ app.get('/api/musicians/:id', async (req, res) => {
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
-    res.json({ status: 'OK', message: 'Server is running with Supabase' });
+    res.json({ 
+        status: 'OK', 
+        message: 'Server is running with Supabase',
+        storage: {
+            bucket: STORAGE_BUCKET,
+            endpoint: STORAGE_ENDPOINT,
+            region: STORAGE_REGION
+        }
+    });
+});
+
+// Storage configuration endpoint
+app.get('/api/storage/config', (req, res) => {
+    res.json({
+        success: true,
+        config: {
+            bucket: STORAGE_BUCKET,
+            endpoint: STORAGE_ENDPOINT,
+            region: STORAGE_REGION,
+            maxFileSize: '50MB',
+            allowedTypes: ['image/*', 'audio/*']
+        }
+    });
+});
+
+// Test storage connection endpoint
+app.get('/api/storage/test', async (req, res) => {
+    try {
+        const { data: buckets, error } = await supabase.storage.listBuckets();
+        
+        if (error) {
+            return res.status(500).json({
+                success: false,
+                message: 'Storage connection failed',
+                error: error.message
+            });
+        }
+        
+        const uploadsBucket = buckets.find(bucket => bucket.name === STORAGE_BUCKET);
+        
+        res.json({
+            success: true,
+            message: 'Storage connection successful',
+            bucket: {
+                name: STORAGE_BUCKET,
+                exists: !!uploadsBucket,
+                public: uploadsBucket?.public || false
+            },
+            totalBuckets: buckets.length
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: 'Storage test failed',
+            error: error.message
+        });
+    }
 });
 
 // Test endpoint
