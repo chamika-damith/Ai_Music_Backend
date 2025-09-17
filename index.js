@@ -2,9 +2,41 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
+
 const { createClient } = require('@supabase/supabase-js');
 const { v4: uuidv4 } = require('uuid');
+
 const app = express();
+
+// Configure AWS S3
+AWS.config.update({
+  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  region: process.env.AWS_REGION || 'us-east-1'
+});
+
+const s3 = new AWS.S3();
+
+// Helper function to upload file to S3
+const uploadToS3 = async (file, folder = 'tracks') => {
+  const fileName = `${folder}/${Date.now()}_${file.originalname}`;
+  
+  const params = {
+    Bucket: process.env.AWS_S3_BUCKET_NAME,
+    Key: fileName,
+    Body: file.buffer,
+    ContentType: file.mimetype,
+    ACL: 'public-read' // Make file publicly accessible
+  };
+
+  try {
+    const result = await s3.upload(params).promise();
+    return result.Location; // Returns the public URL of the uploaded file
+  } catch (error) {
+    console.error('S3 upload error:', error);
+    throw error;
+  }
+};
 
 app.use(cors());
 app.use(express.json());
@@ -37,6 +69,7 @@ const upload = multer({
   }
 });
 
+
 // Test Supabase connection
 supabase.from('users').select('count', { count: 'exact', head: true })
   .then(({ error }) => {
@@ -46,6 +79,7 @@ supabase.from('users').select('count', { count: 'exact', head: true })
       console.log('Connected to Supabase successfully');
     }
   });
+
 
 // Helper function to handle database errors
 const handleDatabaseError = (error, res, operation = 'operation') => {
@@ -412,11 +446,13 @@ app.post('/api/users', async (req, res) => {
     }
 });
 
+
 // Track Management APIs
 app.post('/api/tracks', async (req, res) => {
     try {
         const trackData = toSnakeCase(req.body);
         
+
         // Check if track with same trackId already exists
         if (trackData.track_id) {
             const { data: existingTrack } = await supabase
@@ -433,6 +469,7 @@ app.post('/api/tracks', async (req, res) => {
             }
         }
 
+
         const { data: track, error } = await supabase
             .from('tracks')
             .insert([trackData])
@@ -442,6 +479,7 @@ app.post('/api/tracks', async (req, res) => {
         if (error) {
             return handleDatabaseError(error, res, 'track creation');
         }
+
 
         res.status(201).json({
             success: true,
