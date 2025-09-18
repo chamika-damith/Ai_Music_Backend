@@ -1,0 +1,30 @@
+# Node.js
+node_modules/
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+.env
+.DS_Store
+*.sqlite
+*.sqlite3
+coverage/
+logs/
+*.log
+.idea/
+.vscode/
+
+# OS generated files
+Thumbs.db
+.DS_Store
+
+# Backup files
+*.bak
+*.tmp
+
+# Misc
+*.swp
+*.swo
+
+# Supabase
+supabase/.temp/
+supabase/.output/
